@@ -1,0 +1,611 @@
+PRODUCT REQUIREMENTS DOCUMENT
+Lightweight CI/CD Platform
+Jenkins-Inspired Build Automation System
+Version 1.0  •  Engineering Draft
+Document Status
+Draft — For Internal Review
+Version
+1.0
+Audience
+Engineering, DevOps, Product
+Classification
+Internal
+Authors
+Kartikeya Gupta, Dimple Hirwani
+1. Executive Summary
+This document defines the product requirements for a Lightweight CI/CD Platform, a Jenkins-inspired continuous integration and continuous delivery system 
+designed for small engineering teams and DevOps learners. The platform automates the lifecycle from code commit to build artifact, replacing fragile manual processes with a reliable, repeatable pipeline engine.
+Modern software teams face an acute 
+challenge: every code change must be validated, built, tested, and packaged before it can be safely deployed. Without automation, this process is slow, error-prone, and impossible to scale. CI/CD systems solve this by detecting code events and executing a 
+defined sequence of steps in an isolated, reproducible environment.
+Target Users
+Small development teams (2 engineers) requiring lightweight build automation
+DevOps practitioners building or studying CI/CD infrastructure
+Engineering educators and bootcamp
+s teaching software delivery concepts
+Startups seeking a self-hosted alternative to expensive SaaS CI platforms
+Key Goals
+Automate build, test, and packaging workflows triggered by version control events
+Provide a pipeline-as-code model using YAML 
+configuration stored in repositories
+Execute all jobs in containerized, ephemeral environments for isolation and reproducibility
+Deliver real-time log streaming and structured build result reporting
+Support horizontal scaling of worker nodes to handle conc
+urrent pipeline loads
+2. Objectives
+The platform must achieve the following engineering objectives in its first production release:
+2.1 Automated Build Pipelines
+The system must support multi-stage pipelines defined declaratively in YAML. Each stage exec
+utes a shell command or script within a container. Stages execute sequentially by default, with failure in any stage halting the pipeline.
+2.2 Git Event Triggers
+Builds must be automatically triggered via webhook callbacks from Git hosting providers such 
+as GitHub, GitLab, or Gitea. The system must verify webhook signatures, parse the event payload, resolve the target branch and commit SHA, and enqueue a new build within 500ms of receiving the event.
+2.3 Containerized Job Execution
+Every pipeline job must
+ run in an ephemeral Docker container. The container image is specified in the pipeline YAML and is pulled fresh (or from cache) per execution. No state persists between jobs unless explicitly mounted as a volume. Resource limits (CPU, memory) are enforced
+ per container.
+2.4 Pipeline Configuration as Code
+Pipeline definitions live in the repository as a .cicd.yml file. This enables versioned, reviewable, and auditable pipeline changes through the same pull request workflow developers already use for applic
+ation code.
+2.5 Real-Time Log Streaming
+Clients connected to the build log endpoint must receive a live stream of stdout/stderr output as the pipeline executes. Log lines must be delivered with sub-second latency using Server-Sent Events (SSE) or WebSocke
+ts.
+2.6 Build Result Reporting
+Every completed build must record a structured result containing status (success, failure, cancelled), duration, exit codes per stage, and a link to stored artifacts. Results must be queryable via REST API and displayed in t
+he web dashboard.
+2.7 Horizontal Worker Scaling
+The worker tier must be stateless and horizontally scalable. Additional worker processes can be added to any machine with network access to the job queue, without any configuration changes to the CI 
+Controller.
+3. Non-Goals (Version 1.0)
+The following features are explicitly out of scope for the initial release. They are documented here to establish clear boundaries and prevent scope creep during development.
+These features may be considered for fut
+ure versions. See Section 15: Future Enhancements for prioritized candidates.
+Enterprise Role-Based Access Control (RBAC) — fine-grained permissions, audit trails, and SSO/SAML integration
+Kubernetes-native runner integration (KubeRunner) — scheduling po
+ds as build agents
+Plugin/extension marketplace — third-party integrations installable via a registry
+Parallel stage execution within a single pipeline — all stages are sequential in v1
+Dependency caching — no cross-build npm/pip/maven cache sharing in v1
+Multi-tenancy — the system serves a single organization; no tenant isolation
+Native mobile app for build monitoring
+SLA-based build queue prioritization
+Self-hosted Git server — the platform integrates with existing providers only
+4. Key Features
+4.1 
+Repository Integration
+The platform connects to Git repositories via webhook endpoints. When a developer pushes code or opens a pull request, the Git provider sends an HTTP POST to the CI system’s webhook URL. The system validates the HMAC-SHA256 signature
+, parses the event, and identifies the affected branch and commit.
+Supports GitHub, GitLab, and Gitea webhook formats
+Verifies webhook secret signatures to prevent spoofed events
+Filters events by branch pattern (e.g., main, release/*)
+Stores raw webhook p
+ayloads for auditability
+4.2 Pipeline as Code
+All pipeline logic is defined in a .cicd.yml file at the repository root. The file specifies the container image, environment variables, and the sequence of named stages to execute. This file is parsed fresh o
+n every build, ensuring pipeline configuration is always consistent with the commit being built.
+pipeline:
+  image: node:18-alpine
+  environment:
+    NODE_ENV: test
+    CI: 'true'
+  stages:
+    - name: install
+      run: npm ci
+    - name: lint
+      run: npm run lint
+    - name: test
+      run: npm test -- --coverage
+    - name: build
+      run: npm run build
+    - name: docker-build
+      run: docker build -t myapp:${COMMIT_SHA} .
+4.3 Job Queue
+Build jobs are placed on an asynchronous queue i
+mplemented with Redis. The queue decouples the CI Controller (which receives webhooks) from the Worker Nodes (which execute pipelines). This architecture ensures that a spike in build events does not cause webhook timeouts, and that the system degrades gra
+cefully under load.
+FIFO queue with configurable depth limit (default: 1000 jobs)
+Dead-letter queue (DLQ) for jobs that fail to be claimed after a timeout
+Job payload includes: repository URL, commit SHA, branch, pipeline YAML, and metadata
+4.4 
+Worker Executors
+Worker nodes are independent processes that poll the job queue, claim a job, and execute the pipeline inside a Docker container. Workers are stateless and can run on any machine with Docker and network access to the queue. Multiple workers
+ can run concurrently on the same host or across multiple hosts.
+Workers register themselves with a heartbeat every 10 seconds
+A job is re-queued if the claiming worker stops sending heartbeats
+Workers enforce CPU and memory limits via Docker --cpus and --
+memory flags
+4.5 Build Logs
+Container stdout and stderr are captured in real time using the Docker logs streaming API. Log lines are written to the Log Storage backend (append-only) and simultaneously pushed to connected clients via Server-Sent 
+Events. Each log line is tagged with a timestamp, stage name, and stream type (stdout/stderr).
+4.6 Build Status
+Every build has a lifecycle status: pending, running, success, failure, cancelled. Status transitions are atomic and persisted to PostgreSQL. T
+he CI Controller exposes status via REST API and (in future) via commit status callbacks to the Git provider.
+4.7 Artifact Storage
+Build outputs declared in the pipeline YAML are uploaded to an S3-compatible object store (MinIO for self-hosted deployments
+). Each artifact is keyed by repository ID, build ID, and filename. Artifacts are retained for a configurable period (default: 30 days) before automated cleanup.
+5. System Architecture
+5.1
+ Component Overview
+CI Controller — Stateless web service; handles webhooks, parses pipeline YAML, creates build records, and enqueues jobs
+Job Queue — Redis-backed FIFO queue; decouples event ingestion from execution; provides job visibility and DLQ
+Worke
+r Nodes — Stateless polling services; claim jobs, launch containers, stream logs, report results
+Execution Environment — Docker daemon; provides container isolation, resource enforcement, and filesystem cleanup
+PostgreSQL Database — Source of truth for all
+ build metadata, status, and results
+Log Storage — Redis Streams (hot) + S3 (cold archival); append-only, indexed by build and stage
+Artifact Storage — S3-compatible object store; versioned by build ID
+Web Dashboard — Read-only React UI consuming the REST 
+API; displays build history, live logs, and artifacts
+6. Data Flow Diagram
+The following diagram traces the path of a single code push event through the entire system, from developer action to stored result.
+Key design 
+decisions reflected in this flow:
+Webhook validation occurs before any database write, protecting against denial-of-service via forged events
+Pipeline YAML is fetched at the exact commit SHA being built, ensuring the pipeline definition matches the code
+Ar
+tifact upload happens before the final result write, so a failed upload marks the build as failed
+The completion event via Redis pub/sub allows the dashboard to update without polling
+7. Component Breakdown
+7.1 CI Controller
+The CI Controller is a statele
+ss HTTP service (Node.js or Python/FastAPI) responsible for the ingestion and orchestration layer.
+Responsibilities
+Expose POST /webhook to receive events from Git providers
+Validate HMAC-SHA256 signatures using a per-repository secret
+Fetch the 
+.cicd.yml file via the Git provider’s raw content API at the target commit SHA
+Parse and validate the YAML against the pipeline schema
+Create a Build record in PostgreSQL with status = pending
+Serialize the job payload (repo URL, commit SHA, branch, 
+parsed pipeline, build ID) as JSON
+Push the job to the Redis FIFO queue
+Return HTTP 202 Accepted to the webhook caller
+The CI Controller never executes pipeline code. All build logic is delegated to Worker Nodes via the queue. This separation ensures that
+ webhook handling remains fast and never blocked by long-running builds.
+7.2 Scheduler
+The Scheduler is a lightweight background process embedded within the CI Controller that manages job lifecycle and worker health.
+Responsibilities
+Monitor the job 
+queue depth and emit metrics (queue_depth gauge)
+Track worker heartbeats in Redis with a TTL of 30 seconds
+Detect workers that have missed heartbeats and mark their in-progress jobs as orphaned
+Re-enqueue orphaned jobs up to 3 retry attempts before moving 
+them to the DLQ
+Enforce global concurrency limits (max concurrent builds configurable via environment variable)
+7.3 Worker Service
+The Worker Service is a stateless polling daemon written in the same language as the CI Controller. Multiple instances can r
+un concurrently without coordination.
+Responsibilities
+Poll the Redis job queue using BRPOPLPUSH with a 30-second timeout (reliable queue pattern)
+Claim a job by moving it from the pending list to an in-progress list atomically
+Update the Build record sta
+tus to running in PostgreSQL
+Send heartbeat updates to Redis every 10 seconds while executing
+Invoke the Execution Engine to run the pipeline stages
+Stream log lines to the Log Service as they arrive from Docker
+Upload artifacts on successful completion
+Wr
+ite the final Build result (status, duration, per-stage exit codes) to PostgreSQL
+Acknowledge (delete) the job from the in-progress list on completion
+7.4 Execution Engine
+The Execution Engine is the core library embedded within the Worker that directly i
+nteracts with the Docker daemon.
+Responsibilities
+Pull the specified container image (with exponential backoff on transient failures)
+Create a container with environment variables, resource limits, and a mounted workspace volume
+Execute pipeline 
+stages sequentially by running docker exec for each stage command
+Capture stdout and stderr in real time using the Docker Attach API
+Detect non-zero exit codes and halt execution immediately (fail-fast semantics)
+Remove the container and clean up the works
+pace volume on completion or failure
+Enforce a per-build timeout (default: 30 minutes); kill the container if exceeded
+8. Pipeline Execution Model
+Pipelines are declared in .cicd.yml at the repository root. The schema is minimal by design, 
+following the principle of convention over configuration.
+8.1 Full Pipeline Schema
+# .cicd.yml
+pipeline:
+  image: node:18-alpine          # Docker image for all stages
+  timeout: 1800                  # Max build duration in seconds (default: 1800)
+  envi
+ronment:                   # Injected into all stage containers
+    NODE_ENV: test
+    DATABASE_URL: postgres://...
+  secrets:                       # References to secrets stored in the CI system
+    - NPM_TOKEN                  # Injected as env vars, ne
+ver logged
+    - DOCKER_PASSWORD
+  stages:
+    - name: install
+      run: npm ci
+    - name: lint
+      run: npm run lint
+    - name: test
+      run: npm test -- --coverage --reporter=junit
+    - name: build
+      run: npm run build
+    - name: 
+publish
+      run: docker build -t myapp:${COMMIT_SHA} . && docker push myapp:${COMMIT_SHA}
+      when: branch == 'main'      # Conditional execution
+  artifacts:
+    paths:
+      - dist/
+      - coverage/lcov.info
+    expire_in: 30d
+8.2 Stage Execution 
+Logic
+Stages execute sequentially in the order defined. Each stage runs as a separate shell command within the same container instance (using docker exec), preserving the filesystem state between stages. This is intentional: installed 
+dependencies from the install stage are available in the test stage.
+If a stage exits with code 0: mark stage as passed, continue to next stage
+If a stage exits with non-zero code: mark stage as failed, mark build as failed, stop execution
+If the build ti
+meout is exceeded: send SIGTERM to container, wait 10 seconds, then SIGKILL
+Secrets referenced in the YAML are injected as environment variables and suppressed in log output
+The COMMIT_SHA, BRANCH_NAME, BUILD_ID, and REPO_NAME variables are always injected
+8.3 Conditional Execution
+The when field on a stage supports simple expressions evaluated by the CI Controller before enqueueing. Supported conditions include branch equality checks (branch == 'main') and tag pattern matches (tag =~ /^v\d+/). Stages whos
+e conditions evaluate to false are skipped and marked as skipped in the build result.
+9. Database Design
+PostgreSQL is the primary datastore. All tables use UUID primary keys. Timestamps are stored in UTC as timestamptz. Indexes are defined to support the
+ most common query patterns.
+9.1 repositories
+Field
+Type
+Description
+id
+UUID PK
+Unique repository identifier
+provider
+VARCHAR(32)
+git_provider: github, gitlab, gitea
+full_name
+VARCHAR(255)
+org/repo-name as returned by provider
+clone_url
+TEXT
+HTTPS clone URL
+webhook_secret
+TEXT (encrypted)
+HMAC secret for webhook validation
+default_branch
+VARCHAR(128)
+Default branch name (e.g. main)
+created_at
+TIMESTAMPTZ
+Record creation timestamp
+9.2 builds
+Field
+Type
+Description
+id
+UUID PK
+Unique 
+build identifier
+repository_id
+UUID FK
+References repositories.id
+commit_sha
+CHAR(40)
+Full Git commit SHA
+branch
+VARCHAR(255)
+Source branch name
+status
+VARCHAR(32)
+pending | running | success | failure | cancelled
+triggered_by
+VARCHAR(64)
+push | 
+pull_request | manual | schedule
+started_at
+TIMESTAMPTZ
+When the worker began execution
+finished_at
+TIMESTAMPTZ
+When execution completed or was cancelled
+duration_ms
+INTEGER
+Total execution time in milliseconds
+pipeline_yaml
+TEXT
+Snapshot of 
+pipeline config at time of build
+created_at
+TIMESTAMPTZ
+Record creation timestamp
+9.3 stages
+Field
+Type
+Description
+id
+UUID PK
+Unique stage result identifier
+build_id
+UUID FK
+References builds.id
+name
+VARCHAR(128)
+Stage name from pipeline YAML
+position
+INTEGER
+Execution order (0-indexed)
+status
+VARCHAR(32)
+pending | running | success | failure | skipped
+exit_code
+INTEGER
+Container process exit code (null if skipped)
+started_at
+TIMESTAMPTZ
+Stage start timestamp
+finished_at
+TIMESTAMPTZ
+Stage end timestamp
+duration_ms
+INTEGER
+Stage execution time in milliseconds
+9.4 artifacts
+Field
+Type
+Description
+id
+UUID PK
+Unique artifact identifier
+build_id
+UUID FK
+References builds.id
+name
+VARCHAR(255)
+Original file or 
+directory path
+storage_key
+TEXT
+S3 object key
+size_bytes
+BIGINT
+File size in bytes
+content_type
+VARCHAR(128)
+MIME type
+expires_at
+TIMESTAMPTZ
+Scheduled deletion timestamp
+created_at
+TIMESTAMPTZ
+Upload timestamp
+10. API Design
+All endpoints 
+return JSON. Authentication uses Bearer tokens (API keys stored in the database). Rate limiting is applied at 100 requests/minute per token.
+POST /webhook
+Receives inbound webhook events from Git providers.
+Headers:
+  
+X-Hub-Signature-256: sha256=<hmac>
+  X-GitHub-Event: push
+Body (GitHub push event):
+{
+  "ref": "refs/heads/main",
+  "after": "a3f8c2d...",
+  "repository": { "full_name": "org/repo", "clone_url": "..." }
+}
+Response 202:
+{ "build_id": "uuid", "status": "pe
+nding" }
+GET /builds
+List builds with optional filters.
+Query params: repository_id, branch, status, page, limit
+Response 200:
+{
+  "builds": [
+    { "id": "uuid", "status": "success", "branch": "main",
+      "commit_sha": "a3f8c2d", 
+"duration_ms": 42300,
+      "created_at": "2025-03-01T12:00:00Z" }
+  ],
+  "pagination": { "page": 1, "limit": 20, "total": 84 }
+}
+GET /builds/{id}
+Retrieve full detail for a single build including stage results.
+Response 200:
+{
+  "id": "uuid",
+  
+"status": "failure",
+  "stages": [
+    { "name": "install", "status": "success", "duration_ms": 8200 },
+    { "name": "test", "status": "failure", "exit_code": 1, "duration_ms": 3100 }
+  ],
+  "artifacts": []
+}
+GET /builds/{id}/logs
+Stream build logs usin
+g Server-Sent Events. Each event is a JSON-encoded log line.
+Headers:
+  Accept: text/event-stream
+Response (streaming):
+data: 
+{"ts":"2025-03-01T12:01:00.123Z","stage":"test","stream":"stdout","line":"PASS src/app.test.js"}
+data: {"ts":"2025-03-01T12:01:00.456Z","stage":"test","stream":"stderr","line":"Error: Cannot find module"}
+data: {"event":"build.complete","status":"failure"}
+POST /builds/{id}/cancel
+Cancel a pending or running build. Sends SIGTERM to the running container.
+Response 200:
+{ "id": "uuid", "status": "cancelled" }
+GET /builds/{id}/artifacts
+List artifacts for a completed build with pre-signed download URLs.
+Re
+sponse 200:
+{
+  "artifacts": [
+    { "name": "dist/app.js", "size_bytes": 142300,
+      "download_url": "https://storage.../presigned?token=...",
+      "expires_at": "2025-04-01T00:00:00Z" }
+  ]
+}
+11. Worker Execution Model
+11.1 Job Polling
+Workers use the Redis BRPOPLPUSH command to atomically move a job from the pending queue to an in-progress queue. This reliable queue pattern ensures that if a worker crashes mid-execution, the Scheduler can detect the orphaned job and re-enqueue it. Worke
+rs block with a 30-second timeout, then loop, maintaining a low-latency polling behavior without busy-waiting.
+11.2 Container Execution
+docker run \
+  --rm \
+  --name cicd-build-{build_id} \
+  --cpus="1.0" \
+  --memory="512m" \
+  
+--memory-swap="512m" \
+  --network=none \
+  --env COMMIT_SHA={sha} \
+  --env BRANCH_NAME={branch} \
+  --env BUILD_ID={id} \
+  --env-file /tmp/secrets-{id}.env \
+  --volume /workspace/{id}:/workspace \
+  --workdir /workspace \
+  {image}
+11.3 Resource Limi
+ts
+Default resource limits are configurable per deployment and can be overridden in the pipeline YAML:
+CPU: 1.0 core (configurable, max 4.0)
+Memory: 512 MB (configurable, max 4 GB)
+Disk (workspace): 2 GB ephemeral volume
+Build timeout: 30 minutes 
+(configurable up to 2 hours)
+Network: disabled by default; enabled only if pipeline requests it
+11.4 Environment Setup
+Before container execution, the Worker performs the following setup steps:
+Creates an ephemeral workspace directory on the host
+Clones the repository at the exact commit SHA into the workspace
+Resolves referenced secrets from the secrets store and writes them to a temporary env file (mode 0600)
+Deletes the env file immediately after docker run exits to prevent credential leakage
+12
+. Security Considerations
+12.1 Running Untrusted Code
+Pipeline YAML may contain arbitrary shell commands submitted by repository contributors. The system must treat all pipeline code as untrusted:
+All execution occurs inside Docker containers with no host 
+filesystem access
+Network access is disabled by default; pipelines must explicitly request it
+Container processes run as a non-root user (uid 1000) by default
+The Docker daemon socket is never mounted into build containers
+Host directories are not accessib
+le from inside build containers
+12.2 Webhook Authentication
+Every repository has a unique HMAC-SHA256 webhook secret
+Signature validation uses constant-time comparison to prevent timing attacks
+Webhook payloads are rejected immediately if signature is abs
+ent or invalid
+Raw webhook payloads are logged for forensic analysis
+12.3 Secret Management
+Secrets are stored encrypted at rest using AES-256-GCM with a KMS-managed key
+Secrets are injected as environment variables at runtime; they are never 
+written to logs
+Log scrubbing: the log pipeline replaces known secret values with [REDACTED]
+Secrets are stored in a temporary file (mode 0600) that is deleted immediately after use
+12.4 Rate Limiting
+Webhook endpoint: 100 requests/minute per repository
+R
+EST API: 100 requests/minute per API key
+Build trigger rate: configurable max builds per hour per repository
+Queue depth limit: 1000 pending jobs (configurable); new jobs rejected beyond this limit
+13. Scalability Considerations
+13.1 Horizontal Worker Sca
+ling
+The worker tier is designed to scale horizontally with zero configuration. Additional workers are launched as processes or containers pointed at the same Redis queue. The queue’s BRPOPLPUSH command provides natural load balancing: whichever worker is 
+free first claims the next job.
+Scaling guidance:
+1 worker: suitable for teams with < 5 daily builds
+3–5 workers: suitable for teams with 20–50 daily builds and short build times
+10+ workers: suitable for larger teams or repositories with > 5 minute 
+builds
+13.2 Distributed Queue
+Redis is deployed in a primary-replica configuration with Redis Sentinel for automatic failover. The job queue is backed by Redis persistence (AOF with fsync everysec) to prevent job loss during restarts. For very high throug
+hput, the queue can be migrated to a dedicated message broker such as RabbitMQ or Apache Kafka without changes to the Worker interface.
+13.3 Database Scaling
+PostgreSQL is deployed with a read replica for analytics and dashboard queries. Write traffic (bu
+ild results, log metadata) remains on the primary. Connection pooling is handled by PgBouncer in transaction mode, supporting hundreds of concurrent worker connections with a small number of actual database connections.
+13.4 Artifact Storage 
+Scaling
+Artifact storage on S3 scales horizontally without application-level changes. For self-hosted deployments using MinIO, a distributed MinIO cluster (4+ nodes) can be configured to handle multi-terabyte artifact storage with 99.999% durability. Pre-s
+igned URLs allow clients to download artifacts directly from S3, bypassing the CI Controller and preventing it from becoming a bandwidth bottleneck.
+14. Observability
+14.1 Logging
+All services emit structured JSON logs to stdout. Log fields include: servi
+ce, level, timestamp (ISO 8601), request_id (for tracing across services), and context-specific fields. Logs are collected by a log aggregator (Loki, Datadog, or CloudWatch) and indexed for search.
+Info: webhook received, build enqueued, stage started/com
+pleted, artifact uploaded
+Warning: job retry attempted, worker heartbeat missed, queue depth above 80%
+Error: webhook signature failure, Docker pull failure, database write failure
+14.2 Metrics
+The CI Controller and Worker services expose Prometheus metri
+cs on /metrics:
+builds_total (counter): total builds by status and repository
+build_duration_seconds (histogram): build execution time distribution
+queue_depth (gauge): current number of pending jobs in the queue
+worker_count (gauge): number of active (hea
+rtbeating) workers
+stage_failure_rate (gauge): ratio of failed stages per repository
+14.3 Alerting
+Recommended alert thresholds for production deployments:
+Queue depth > 100 for more than 5 minutes: indicates insufficient worker capacity
+Worker count == 0
+: no workers active; all builds will stall
+Build failure rate > 50% in a 1-hour window: potential infrastructure issue
+Webhook endpoint p99 latency > 500ms: indicates CI Controller overload
+15. Future Enhancements
+The following features are 
+candidates for future versions, ordered by estimated impact and development effort:
+15.1 Parallel Stage Execution
+Allow pipeline stages to declare dependencies and execute concurrently where the dependency graph permits. This requires a DAG execution engi
+ne in the Worker and significant changes to the log streaming model.
+15.2 Dependency Caching
+Mount a shared cache volume per repository that persists node_modules, .gradle, or pip caches across builds on the same worker. Implement a cache key based on a h
+ash of dependency manifests (package-lock.json, requirements.txt) to invalidate stale caches.
+15.3 Kubernetes Runners
+Implement a Kubernetes-native worker that schedules each build job as a Kubernetes Pod. This enables resource-efficient bin-packing acros
+s a cluster, native integration with Kubernetes secrets, and auto-scaling via the Horizontal Pod Autoscaler.
+15.4 Pull Request Status Reporting
+After a build completes, post a commit status back to the Git provider’s API (GitHub Checks API, GitLab Commit 
+Status API). This enables blocking pull request merges on failed CI builds directly within the Git provider’s interface.
+15.5 Pipeline Visualization UI
+A React-based dashboard providing: a build history timeline, live log streaming with stage 
+navigation, artifact download, and pipeline YAML validation with a visual stage graph. The UI consumes the REST API and SSE endpoints defined in this PRD.
+15.6 Plugin System
+A plugin architecture allowing third-party integrations (Slack notifications, JIR
+A ticket linking, SonarQube code quality gates) to hook into build lifecycle events. Plugins would be declared in the pipeline YAML and distributed via a registry.
+Appendix A: Technology Stack
+Component
+Technology
+Rationale
+CI Controller
+Node.js / 
+Fastify
+High throughput HTTP, non-blocking I/O
+Worker Service
+Node.js / Python
+Docker SDK availability, async I/O
+Job Queue
+Redis 7+
+BRPOPLPUSH, Streams, pub/sub in one service
+Database
+PostgreSQL 15+
+ACID, JSON support, mature ORM ecosystem
+Container Runtime
+Docker Engine
+Ubiquitous, well-documented API
+Artifact Storage
+MinIO / AWS S3
+S3-compatible; self-hosted or cloud
+Log Aggregation
+Redis Streams + S3
+Hot path streaming + cold archival
+Metrics
+Prometheus + Grafana
+Industry 
+standard; vendor-neutral
+Frontend
+React + TypeScript
+Component ecosystem; SSE support
+End of Document
+Lightweight CI/CD Platform PRD • Version 1.0

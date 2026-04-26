@@ -1,11 +1,18 @@
 import express from 'express';
 import morgan from 'morgan';
+import cors from 'cors';
 import webhookRouter from './routes/webhook';
 import buildsRouter from './routes/builds';
 
 const app = express();
 
-app.use(express.json());
+app.use(cors());
+
+app.use(express.json({
+  verify: (req: any, _res, buf) => {
+    req.rawBody = buf.toString('utf8');
+  },
+}));
 app.use(morgan('tiny'));
 
 app.use('/webhook', webhookRouter);
@@ -16,7 +23,7 @@ app.get('/', (_req, res) => {
 });
 
 app.use((err: Error, _req: express.Request, res: express.Response, _next: express.NextFunction) => {
-  console.error(err);
+  console.error(String(err).replace(/[\r\n]/g, ' '));
   res.status(500).json({ error: err.message ?? 'Internal server error' });
 });
 

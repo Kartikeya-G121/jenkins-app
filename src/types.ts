@@ -28,9 +28,13 @@ export interface StageRecord {
   "order": number;
   status: StageStatus;
   commands: string[];
+  loops?: number;
   logs: string;
+  exit_code: number | null;
+  duration_ms: number | null;
   started_at: string | null;
   finished_at: string | null;
+  when?: 'always' | 'success' | 'failed';
 }
 
 export interface ArtifactRecord {
@@ -61,5 +65,6 @@ export interface PipelinePayload {
   };
   pipeline: {
     stages: PipelineStage[];
+    artifacts?: { path: string }[];
   };
 }

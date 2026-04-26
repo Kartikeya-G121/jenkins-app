@@ -1,0 +1,42 @@
+{
+  "repositories": [
+    {
+      "id": "repo1",
+      "name": "testrepo",
+      "url": "https://example.com/repo.git",
+      "created_at": "2026-04-02T21:47:00.386Z"
+    }
+  ],
+  "builds": [
+    {
+      "id": "180c36f6-e7c3-4ef8-99f9-eb3f0e2a7ff6",
+      "repository_id": "repo1",
+      "ref": "refs/heads/main",
+      "commit_id": "abc123",
+      "commit_message": "test",
+      "author": "me",
+      "status": "success",
+      "created_at": "2026-04-02T21:47:00.386Z",
+      "started_at": "2026-04-02T21:47:03.219Z",
+      "finished_at": "2026-04-02T21:47:03.247Z"
+    }
+  ],
+  "stages": [
+    {
+      "id": "175faefb-8880-4acf-8d1a-29314f5f7b76",
+      "build_id": "180c36f6-e7c3-4ef8-99f9-eb3f0e2a7ff6",
+      "name": "test",
+      "order": 0,
+      "status": "success",
+      "commands": [
+        "echo hi"
+      ],
+      "logs": "\n$ echo hi\nhi\n",
+      "exit_code": 0,
+      "duration_ms": 26,
+      "started_at": "2026-04-02T21:47:03.219Z",
+      "finished_at": "2026-04-02T21:47:03.247Z"
+    }
+  ],
+  "artifacts": []
+}
