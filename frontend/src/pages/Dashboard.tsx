@@ -18,6 +18,8 @@ type Build = {
   language?: string;
 };
 
+type Pagination = { page: number; limit: number; total: number };
+
 const LANGUAGE_COLORS: Record<string, string> = {
   python:  '#3b82f6',
   node:    '#22c55e',
@@ -35,31 +37,61 @@ const STATUS_LEFT_BORDER: Record<string, string> = {
 
 export default function Dashboard() {
   const [builds, setBuilds] = useState<Build[]>([]);
+  const [total, setTotal] = useState(0);
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
     const poll = () =>
-      fetch('/builds')
+      fetch('/builds?limit=100')
         .then((r) => { if (!r.ok) throw new Error(`HTTP ${r.status}`); return r.json(); })
-        .then((d) => {
+        .then((d: { builds: Build[]; pagination: Pagination }) => {
           setBuilds(d.builds);
+          setTotal(d.pagination.total);
           setLoading(false);
         })
         .catch(console.error);
 
     poll();
-    const id = setInterval(poll, 30000);
+    const id = setInterval(poll, 10000);
     return () => clearInterval(id);
   }, []);
 
+  const success   = builds.filter((b) => b.status === 'success').length;
+  const failed    = builds.filter((b) => b.status === 'failed').length;
+  const running   = builds.filter((b) => b.status === 'running').length;
+  const queued    = builds.filter((b) => b.status === 'queued').length;
+  const successRate = total > 0 ? Math.round((success / (success + failed || 1)) * 100) : null;
+
+  const KPI_ITEMS = [
+    { label: 'Total Builds',   value: total,        color: 'var(--text-main)'  },
+    { label: 'Success',        value: success,      color: 'var(--success)'    },
+    { label: 'Failed',         value: failed,       color: 'var(--error)'      },
+    { label: 'Running',        value: running,      color: 'var(--warning)'    },
+    { label: 'Queued',         value: queued,       color: 'var(--neutral)'    },
+    { label: 'Success Rate',   value: successRate !== null ? `${successRate}%` : '—', color: successRate !== null && successRate >= 80 ? 'var(--success)' : 'var(--warning)' },
+  ];
+
   return (
     <div>
-      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '2rem' }}>
+      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '1.5rem' }}>
         <h1 className="h1" style={{ marginBottom: 0 }}>Recent Builds</h1>
-        {!loading && (
-          <span className="badge badge-neutral">{builds.length} total</span>
-        )}
       </div>
+
+      {/* KPI row */}
+      {!loading && (
+        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(6, 1fr)', gap: '0.75rem', marginBottom: '1.5rem' }}>
+          {KPI_ITEMS.map(({ label, value, color }) => (
+            <div key={label} className="card" style={{ padding: '0.875rem 1rem' }}>
+              <div style={{ fontSize: '0.65rem', fontWeight: 700, textTransform: 'uppercase', letterSpacing: '0.08em', color: 'var(--text-muted)', marginBottom: '0.4rem' }}>
+                {label}
+              </div>
+              <div style={{ fontSize: '1.5rem', fontWeight: 800, lineHeight: 1, color }}>
+                {value}
+              </div>
+            </div>
+          ))}
+        </div>
+      )}
 
       <WorkersPanel />
 

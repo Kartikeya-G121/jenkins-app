@@ -3,6 +3,7 @@ import morgan from 'morgan';
 import cors from 'cors';
 import webhookRouter from './routes/webhook';
 import buildsRouter from './routes/builds';
+import repositoriesRouter from './routes/repositories';
 import { getWorkerStatus } from './worker';
 import { getQueueDepths } from './queue';
 import { listBuilds } from './db';
@@ -20,6 +21,7 @@ app.use(morgan('tiny'));
 
 app.use('/webhook', webhookRouter);
 app.use('/builds', buildsRouter);
+app.use('/repositories', repositoriesRouter);
 
 app.get('/', (_req, res) => {
   res.json({ service: 'jenkins-app', status: 'ok' });

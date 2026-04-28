@@ -63,7 +63,16 @@ export default function QueuePage() {
     return () => clearInterval(id);
   }, []);
 
-  const totalQueued = data ? Object.values(data.depths).reduce((a, b) => a + b, 0) : 0;
+  const totalQueued  = data ? data.activeBuilds.filter((b) => b.status === 'queued').length : 0;
+  const totalRunning = data ? data.activeBuilds.filter((b) => b.status === 'running').length : 0;
+
+  // Per-language breakdown from activeBuilds (more accurate than Redis depths)
+  const languageCounts = data
+    ? Object.keys(LANGUAGE_COLORS).reduce((acc, lang) => {
+        acc[lang] = data.activeBuilds.filter((b) => b.language === lang).length;
+        return acc;
+      }, {} as Record<string, number>)
+    : null;
 
   return (
     <div>
@@ -74,42 +83,35 @@ export default function QueuePage() {
         <h1 className="h1" style={{ marginBottom: 0 }}>Job Queue</h1>
         {data && (
           <span className="badge badge-neutral" style={{ marginLeft: '0.25rem' }}>
-            {totalQueued} waiting · {data.activeBuilds.filter((b) => b.status === 'running').length} running
+            {totalQueued} waiting · {totalRunning} running
           </span>
         )}
       </div>
 
-      {/* Queue depth cards */}
+      {/* KPI cards */}
       <div className="card" style={{ marginBottom: '1.5rem' }}>
-        <SectionLabel>Queue Depths</SectionLabel>
+        <SectionLabel>Active by Language</SectionLabel>
         <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: '0.75rem' }}>
-          {data
-            ? Object.entries(data.depths).map(([lang, depth]) => (
+          {languageCounts
+            ? Object.entries(languageCounts).map(([lang, count]) => (
                 <div
                   key={lang}
                   style={{
-                    background: depth > 0 ? LANGUAGE_BG[lang] : 'var(--bg-main)',
-                    border: `1px solid ${depth > 0 ? LANGUAGE_COLORS[lang] : 'var(--border-color)'}`,
+                    background: count > 0 ? LANGUAGE_BG[lang] : 'var(--bg-main)',
+                    border: `1px solid ${count > 0 ? LANGUAGE_COLORS[lang] : 'var(--border-color)'}`,
                     borderRadius: '8px',
                     padding: '1rem 1.25rem',
                     transition: 'all 0.3s',
                   }}
                 >
-                  <div style={{
-                    color: LANGUAGE_COLORS[lang],
-                    fontWeight: 700,
-                    fontSize: '0.7rem',
-                    textTransform: 'uppercase',
-                    letterSpacing: '0.08em',
-                    marginBottom: '0.6rem',
-                  }}>
+                  <div style={{ color: LANGUAGE_COLORS[lang], fontWeight: 700, fontSize: '0.7rem', textTransform: 'uppercase', letterSpacing: '0.08em', marginBottom: '0.6rem' }}>
                     {lang}
                   </div>
                   <div style={{ fontSize: '2.25rem', fontWeight: 800, lineHeight: 1, color: 'var(--text-main)' }}>
-                    {depth}
+                    {count}
                   </div>
                   <div style={{ fontSize: '0.72rem', color: 'var(--text-muted)', marginTop: '0.3rem' }}>
-                    {depth === 1 ? 'job waiting' : 'jobs waiting'}
+                    {count === 1 ? 'active job' : 'active jobs'}
                   </div>
                 </div>
               ))

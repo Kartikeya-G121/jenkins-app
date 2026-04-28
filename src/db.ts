@@ -8,6 +8,16 @@ const pool = new Pool({
   connectionString: process.env.DATABASE_URL,
 });
 
+export async function listRepositories(): Promise<RepositoryRecord[]> {
+  const result = await pool.query('SELECT * FROM repositories ORDER BY created_at DESC');
+  return result.rows;
+}
+
+export async function deleteRepository(id: string): Promise<boolean> {
+  const result = await pool.query('DELETE FROM repositories WHERE id = $1', [id]);
+  return (result.rowCount ?? 0) > 0;
+}
+
 export async function getRepository(id: string): Promise<RepositoryRecord | null> {
   const result = await pool.query('SELECT * FROM repositories WHERE id = $1', [id]);
   return result.rows[0] || null;

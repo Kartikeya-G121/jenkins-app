@@ -6,6 +6,10 @@ dotenv.config();
 
 export const redis = new Redis(process.env.REDIS_URL || 'redis://localhost:6380');
 
+// Separate connection for non-blocking reads (HTTP endpoints)
+// Workers hold the main connection with blocking brpoplpush calls
+export const redisReader = new Redis(process.env.REDIS_URL || 'redis://localhost:6380');
+
 const QUEUE_KEY = 'build_queue';
 export const IN_PROGRESS_KEY = 'build_in_progress';
 
@@ -24,7 +28,7 @@ export async function enqueueBuild(buildPayload: any, language: WorkerLanguage =
 }
 
 // Try language queue first, then fall back to generic
-export async function dequeueBuild(language: WorkerLanguage, timeoutSeconds = 5): Promise<any | null> {
+export async function dequeueBuild(language: WorkerLanguage, timeoutSeconds = 1): Promise<any | null> {
   const primary = LANGUAGE_QUEUES[language];
   const fallback = LANGUAGE_QUEUES['generic'];
 
@@ -46,6 +50,6 @@ export async function acknowledgeBuild(buildPayload: any) {
 
 export async function getQueueDepths(): Promise<Record<string, number>> {
   const entries = Object.entries(LANGUAGE_QUEUES);
-  const lengths = await Promise.all(entries.map(([, key]) => redis.llen(key)));
+  const lengths = await Promise.all(entries.map(([, key]) => redisReader.llen(key)));
   return Object.fromEntries(entries.map(([lang], i) => [lang, lengths[i]]));
 }
