@@ -8,38 +8,38 @@ A minimal Jenkins-like CI/CD control plane built with Node.js, PostgreSQL, and R
 
 ```
                         ┌─────────────────────────────────────────┐
-                        │              Express Server              │
+                        │              Express Server             │
   GitHub / curl  ──────▶│  POST /webhook                          │
-                        │    - verify HMAC signature               │
-                        │    - fetch .cicd.yml from GitHub         │
-                        │    - create build + stages in DB         │
-                        │    - enqueue to Redis (by language)      │
+                        │    - verify HMAC signature              │
+                        │    - fetch .cicd.yml from GitHub        │
+                        │    - create build + stages in DB        │
+                        │    - enqueue to Redis (by language)     │
                         └────────────────┬────────────────────────┘
                                          │
                               ┌──────────▼──────────┐
-                              │    Redis Queues      │
-                              │  build_queue:python  │
-                              │  build_queue:node    │
-                              │  build_queue:java    │
-                              │  build_queue:generic │
+                              │    Redis Queues     │
+                              │  build_queue:python │
+                              │  build_queue:node   │
+                              │  build_queue:java   │
+                              │  build_queue:generic│
                               └──────────┬──────────┘
                                          │
               ┌──────────────────────────▼──────────────────────────┐
-              │                    Worker Pool                       │
-              │  worker-python-1   worker-node-1                     │
-              │  worker-java-1     worker-generic-1                  │
-              │                                                      │
-              │  Each worker polls its own language queue first,     │
-              │  falls back to generic queue if empty.               │
-              │  Runs pipeline stages sequentially in Docker.        │
+              │                    Worker Pool                      │
+              │  worker-python-1   worker-node-1                    │
+              │  worker-java-1     worker-generic-1                 │
+              │                                                     │
+              │  Each worker polls its own language queue first,    │
+              │  falls back to generic queue if empty.              │
+              │  Runs pipeline stages sequentially in Docker.       │
               └──────────────────────────┬──────────────────────────┘
                                          │
                               ┌──────────▼──────────┐
-                              │     PostgreSQL       │
-                              │  repositories        │
-                              │  builds              │
-                              │  stages              │
-                              │  artifacts           │
+                              │     PostgreSQL      │
+                              │  repositories       │
+                              │  builds             │
+                              │  stages             │
+                              │  artifacts          │
                               └─────────────────────┘
 ```
 
