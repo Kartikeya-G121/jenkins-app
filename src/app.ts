@@ -3,6 +3,9 @@ import morgan from 'morgan';
 import cors from 'cors';
 import webhookRouter from './routes/webhook';
 import buildsRouter from './routes/builds';
+import { getWorkerStatus } from './worker';
+import { getQueueDepths } from './queue';
+import { listBuilds } from './db';
 
 const app = express();
 
@@ -20,6 +23,18 @@ app.use('/builds', buildsRouter);
 
 app.get('/', (_req, res) => {
   res.json({ service: 'jenkins-app', status: 'ok' });
+});
+
+app.get('/workers', (_req, res) => {
+  res.json({ workers: getWorkerStatus() });
+});
+
+app.get('/queue', async (_req, res) => {
+  const [depths, activeBuilds] = await Promise.all([
+    getQueueDepths(),
+    listBuilds().then((b) => b.filter((x) => x.status === 'queued' || x.status === 'running')),
+  ]);
+  res.json({ depths, activeBuilds });
 });
 
 app.use((err: Error, _req: express.Request, res: express.Response, _next: express.NextFunction) => {

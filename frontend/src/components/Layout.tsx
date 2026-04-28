@@ -1,6 +1,6 @@
 import { ReactNode } from 'react';
-import { Link } from 'react-router-dom';
-import { TerminalSquare } from 'lucide-react';
+import { Link, NavLink } from 'react-router-dom';
+import { TerminalSquare, Layers } from 'lucide-react';
 
 export default function Layout({ children }: { children: ReactNode }) {
   return (
@@ -11,10 +11,13 @@ export default function Layout({ children }: { children: ReactNode }) {
             <TerminalSquare size={24} color="var(--primary)" />
             CI/CD Engine
           </Link>
+
         </div>
       </nav>
-      <main className="main-content container">
-        {children}
+      <main className="main-content">
+        <div style={{ maxWidth: '1100px', margin: '0 auto', padding: '2rem 2rem' }}>
+          {children}
+        </div>
       </main>
     </div>
   );

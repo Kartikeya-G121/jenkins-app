@@ -7,6 +7,8 @@ import { addStages, createArtifact, createBuild, getRepositoryByName, upsertRepo
 import { csrfProtection } from '../middleware/csrf';
 import { enqueueBuild } from '../queue';
 
+import { WorkerLanguage } from '../types';
+
 const router = Router();
 
 router.use(csrfProtection);
@@ -17,10 +19,19 @@ function verifySignature(rawBody: string | undefined, signatureHeader?: string) 
   if (!signatureHeader || !rawBody) return false;
 
   if (!signatureHeader.startsWith('sha256=')) return false;
-  const sent = signatureHeader.slice('sha256='.length);
-  const expected = crypto.createHmac('sha256', webhookSecret).update(rawBody).digest('hex');
+  const sent = Buffer.from(signatureHeader.slice('sha256='.length), 'hex');
+  const expected = Buffer.from(crypto.createHmac('sha256', webhookSecret).update(rawBody).digest('hex'), 'hex');
 
-  return crypto.timingSafeEqual(Buffer.from(sent, 'hex'), Buffer.from(expected, 'hex'));
+  if (sent.length !== expected.length) return false;
+  return crypto.timingSafeEqual(sent, expected);
+}
+
+function detectLanguage(pipeline: any): WorkerLanguage {
+  const image: string = (pipeline?.image || '').toLowerCase();
+  if (image.includes('python')) return 'python';
+  if (image.includes('node') || image.includes('npm') || image.includes('bun')) return 'node';
+  if (image.includes('java') || image.includes('maven') || image.includes('gradle')) return 'java';
+  return 'generic';
 }
 
 router.post('/', async (req, res) => {
@@ -57,6 +68,20 @@ router.post('/', async (req, res) => {
     repoId = repository.id;
   }
 
+  // Fetch .cicd.yml from GitHub before creating the build so we know the language
+  const rawUrl = `https://raw.githubusercontent.com/${repoName}/${commitId}/.cicd.yml`;
+  let pipeline: any = null;
+
+  try {
+    const response = await axios.get(rawUrl, { timeout: 5000 });
+    const parsed = yaml.parse(response.data);
+    pipeline = parsed.pipeline;
+  } catch (error: any) {
+    console.error(`Failed to fetch or parse .cicd.yml for ${repoName}@${commitId}: ${error.message}`);
+  }
+
+  const language = detectLanguage(pipeline);
+
   const buildId = uuidv4();
   await createBuild({
     id: buildId,
@@ -66,34 +91,11 @@ router.post('/', async (req, res) => {
     commit_message: commitMessage,
     author: author,
     status: 'queued',
+    language,
     created_at: now,
     started_at: null,
     finished_at: null,
   });
-
-  // Fetch .cicd.yml from GitHub
-  const rawUrl = `https://raw.githubusercontent.com/${repoName}/${commitId}/.cicd.yml`;
-  let pipelineYaml = '';
-  let pipeline: any = null;
-
-  try {
-    const response = await axios.get(rawUrl, { timeout: 5000 });
-    pipelineYaml = response.data;
-    const parsed = yaml.parse(pipelineYaml);
-    pipeline = parsed.pipeline;
-  } catch (error: any) {
-    console.error(`Failed to fetch or parse .cicd.yml for ${repoName}@${commitId}: ${error.message}`);
-    // If we can't get the pipeline, the build fails immediately
-    await createBuild({
-       // Update the build since it's already created
-       id: buildId, repository_id: repoId, ref: ref || '', commit_id: commitId, 
-       commit_message: commitMessage, author: author, status: 'failed', 
-       created_at: now, started_at: now, finished_at: now
-    } as any); // hacky update, but updateBuild is better:
-    
-    // Actually we should use updateBuild
-    // wait, we just do it right after:
-  }
 
   if (!pipeline || !pipeline.stages || !pipeline.stages.length) {
     await addStages([{
@@ -109,16 +111,11 @@ router.post('/', async (req, res) => {
       started_at: now,
       finished_at: now,
     }]);
-    
-    // We update build status using our pg method
-    // I didn't import updateBuild here so I'll just rely on the DB having 'queued' and worker will fail it, or we import updateBuild.
-    // Let's just let it enqueue and the worker can fail it if no stages.
   } else {
-    // Generate stages based on YAML
     const stageRecords = pipeline.stages.map((stage: any, index: number) => ({
       id: uuidv4(),
       build_id: buildId,
-      name: stage.name || `Stage ${index+1}`,
+      name: stage.name || `Stage ${index + 1}`,
       order: index,
       status: 'queued' as const,
       commands: stage.run ? [stage.run] : (stage.commands || []),
@@ -127,17 +124,17 @@ router.post('/', async (req, res) => {
       duration_ms: null,
       started_at: null,
       finished_at: null,
-      when: stage.when
+      when: stage.when,
     }));
 
     await addStages(stageRecords);
 
-    if (pipeline.artifacts && pipeline.artifacts.paths) {
+    if (pipeline.artifacts?.paths) {
       for (const path of pipeline.artifacts.paths) {
         await createArtifact({
           id: uuidv4(),
           build_id: buildId,
-          path: path,
+          path,
           url: '',
           created_at: now,
         });
@@ -145,14 +142,14 @@ router.post('/', async (req, res) => {
     }
   }
 
-  // Enqueue job to Redis
   await enqueueBuild({
     build_id: buildId,
     repository: { name: repoName, url: repoUrl },
     commit_sha: commitId,
     branch: ref,
-    pipeline: pipeline // Pass parsed pipeline down to worker
-  });
+    pipeline,
+    language,
+  }, language);
 
   return res.status(201).json({ build_id: buildId, status: 'queued' });
 });

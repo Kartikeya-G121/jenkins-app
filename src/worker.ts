@@ -1,9 +1,26 @@
 import { spawn } from 'child_process';
 import { getBuild, getStages, updateBuild, updateStage } from './db';
-import { StageRecord } from './types';
-import { dequeueBuild, acknowledgeBuild } from './queue';
+import { StageRecord, WorkerInfo, WorkerLanguage } from './types';
+import { dequeueBuild, acknowledgeBuild, getQueueDepths } from './queue';
 
-const POLL_INTERVAL_MS = 3000;
+// 4 workers: one per language + one extra generic
+const WORKER_POOL: WorkerInfo[] = [
+  { id: 'worker-python-1', language: 'python',  busy: false, jobsProcessed: 0, currentBuildId: null },
+  { id: 'worker-node-1',   language: 'node',    busy: false, jobsProcessed: 0, currentBuildId: null },
+  { id: 'worker-java-1',   language: 'java',    busy: false, jobsProcessed: 0, currentBuildId: null },
+  { id: 'worker-generic-1',language: 'generic', busy: false, jobsProcessed: 0, currentBuildId: null },
+];
+
+// Random jitter between min and max ms to simulate real-world variance
+function jitter(minMs: number, maxMs: number): Promise<void> {
+  const delay = Math.floor(Math.random() * (maxMs - minMs + 1)) + minMs;
+  return new Promise((resolve) => setTimeout(resolve, delay));
+}
+
+// Simulate random load factor (0.5x – 1.5x) applied to stage duration
+function loadFactor(): number {
+  return 0.5 + Math.random();
+}
 
 async function runDockerCommand(args: string[], onData: (data: string) => void): Promise<number> {
   return new Promise((resolve) => {
@@ -86,6 +103,9 @@ async function runStage(buildId: string, stage: StageRecord, pipelineImage: stri
     flushLogs().catch(console.error);
   };
 
+  // Simulate real-world variance in execution time per stage
+  await jitter(Math.floor(300 * loadFactor()), Math.floor(1500 * loadFactor()));
+
   for (const command of stage.commands) {
     if (await isCancelled(buildId)) {
       logs += `\n$ ${command}\n\nBuild cancelled`;
@@ -145,14 +165,14 @@ async function runStage(buildId: string, stage: StageRecord, pipelineImage: stri
   return true;
 }
 
-async function processBuild(payload: any) {
+async function processBuild(payload: any, worker: WorkerInfo) {
   const { build_id, repository, commit_sha, branch, pipeline } = payload;
-  
+
   if (await isCancelled(build_id)) {
     return;
   }
 
-  console.log(`Worker: starting build ${build_id}`);
+  console.log(`[${worker.id}] starting build ${build_id.replace(/[\r\n]/g, '')}`);
   const startedAt = new Date().toISOString();
   await updateBuild(build_id, { status: 'running', started_at: startedAt });
 
@@ -215,22 +235,50 @@ async function processBuild(payload: any) {
   await cleanupWorkspace(build_id);
 }
 
-async function poll() {
+async function poll(worker: WorkerInfo) {
   try {
-    const job = await dequeueBuild(5); // Block for 5 seconds
+    // Simulate random arrival jitter before polling (100–800ms)
+    await jitter(100, 800);
+
+    const job = await dequeueBuild(worker.language, 5);
     if (job) {
-      await processBuild(job);
+      worker.busy = true;
+      worker.currentBuildId = job.build_id;
+      console.log(`[${worker.id}] picked up build ${job.build_id} (queue: ${worker.language})`);
+
+      // Simulate random pre-execution delay (setup variance)
+      await jitter(200, 1200);
+
+      await processBuild(job, worker);
       await acknowledgeBuild(job);
+
+      worker.jobsProcessed++;
+      worker.busy = false;
+      worker.currentBuildId = null;
+
+      // Log queue depths after each job for observability
+      const depths = await getQueueDepths();
+      console.log(`[${worker.id}] done. Queue depths:`, depths);
     }
   } catch (error) {
-    console.error('Worker polling error:', error);
+    console.error(`[${worker.id}] polling error:`, String(error).replace(/[\r\n]/g, ' '));
+    worker.busy = false;
+    worker.currentBuildId = null;
   }
-  
-  // Continue polling
-  setTimeout(poll, POLL_INTERVAL_MS);
+
+  // Each worker schedules its own next poll with individual jitter
+  const nextPoll = Math.floor(Math.random() * 2000) + 1000; // 1–3s
+  setTimeout(() => poll(worker), nextPoll);
+}
+
+export function getWorkerStatus(): WorkerInfo[] {
+  return WORKER_POOL.map((w) => ({ ...w }));
 }
 
 export function startWorker() {
-  console.log('Worker started, listening to Redis queue');
-  poll();
+  console.log(`Starting worker pool: ${WORKER_POOL.map((w) => w.id).join(', ')}`);
+  // Stagger worker startup to avoid thundering herd on the queue
+  WORKER_POOL.forEach((worker, index) => {
+    setTimeout(() => poll(worker), index * 500);
+  });
 }

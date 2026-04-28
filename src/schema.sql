@@ -13,6 +13,7 @@ CREATE TABLE IF NOT EXISTS builds (
   commit_message TEXT,
   author VARCHAR(255),
   status VARCHAR(32) NOT NULL,
+  language VARCHAR(32) NOT NULL DEFAULT 'generic',
   created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
   started_at TIMESTAMPTZ,
   finished_at TIMESTAMPTZ

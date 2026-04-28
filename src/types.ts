@@ -1,5 +1,6 @@
 export type BuildStatus = 'queued' | 'running' | 'success' | 'failed' | 'cancelled';
 export type StageStatus = 'queued' | 'running' | 'success' | 'failed' | 'skipped' | 'cancelled';
+export type WorkerLanguage = 'python' | 'node' | 'java' | 'generic';
 
 export interface RepositoryRecord {
   id: string;
@@ -16,6 +17,7 @@ export interface BuildRecord {
   commit_message: string;
   author: string;
   status: BuildStatus;
+  language: WorkerLanguage;
   created_at: string;
   started_at: string | null;
   finished_at: string | null;
@@ -49,6 +51,14 @@ export interface PipelineStage {
   name: string;
   commands: string[];
   when?: 'always' | 'success' | 'failed';
+}
+
+export interface WorkerInfo {
+  id: string;
+  language: WorkerLanguage;
+  busy: boolean;
+  jobsProcessed: number;
+  currentBuildId: string | null;
 }
 
 export interface PipelinePayload {
