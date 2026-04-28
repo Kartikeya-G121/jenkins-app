@@ -1,0 +1,9 @@
+pipeline:
+  image: node:18-alpine
+  environment:
+    CI: 'true'
+  stages:
+    - name: "echo test"
+      run: echo "Hello from the CI/CD Pipeline!"
+    - name: "list files"
+      run: ls -la
