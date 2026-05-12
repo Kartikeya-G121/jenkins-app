@@ -1,19 +1,17 @@
 import Redis from 'ioredis';
 import dotenv from 'dotenv';
-import { WorkerLanguage } from './types';
+import { WorkerLanguage, BuildPriority } from './types';
 
 dotenv.config();
 
 export const redis = new Redis(process.env.REDIS_URL || 'redis://localhost:6380');
 
 // Separate connection for non-blocking reads (HTTP endpoints)
-// Workers hold the main connection with blocking brpoplpush calls
 export const redisReader = new Redis(process.env.REDIS_URL || 'redis://localhost:6380');
 
-const QUEUE_KEY = 'build_queue';
 export const IN_PROGRESS_KEY = 'build_in_progress';
 
-// Language-specific queues — workers drain their own queue first, then fall back to generic
+// Language-specific sorted set queues
 export const LANGUAGE_QUEUES: Record<WorkerLanguage, string> = {
   python:  'build_queue:python',
   node:    'build_queue:node',
@@ -21,24 +19,80 @@ export const LANGUAGE_QUEUES: Record<WorkerLanguage, string> = {
   generic: 'build_queue:generic',
 };
 
-export async function enqueueBuild(buildPayload: any, language: WorkerLanguage = 'generic') {
-  const key = LANGUAGE_QUEUES[language] ?? QUEUE_KEY;
-  await redis.lpush(key, JSON.stringify(buildPayload));
-  console.log(`Enqueued build ${buildPayload.build_id} → queue:${language}`);
+// Lower score = higher priority (ZPOPMIN pops lowest score first)
+// Within same priority, earlier enqueue time = lower score = picked first (FIFO)
+const PRIORITY_SCORE: Record<BuildPriority, number> = {
+  high:   1_000_000_000_000,
+  normal: 2_000_000_000_000,
+  low:    3_000_000_000_000,
+};
+
+export function getBranchPriority(ref: string): BuildPriority {
+  const branch = ref.replace('refs/heads/', '').toLowerCase();
+
+  if (
+    branch === 'main' ||
+    branch === 'master' ||
+    branch === 'production' ||
+    branch === 'prod' ||
+    branch.startsWith('release/') ||
+    branch.startsWith('hotfix/')
+  ) return 'high';
+
+  if (
+    branch === 'staging' ||
+    branch === 'stage' ||
+    branch === 'preprod' ||
+    branch === 'pre-prod' ||
+    branch === 'uat' ||
+    branch === 'demo'
+  ) return 'normal';
+
+  if (
+    branch === 'develop' ||
+    branch === 'development' ||
+    branch === 'dev' ||
+    branch.startsWith('feature/') ||
+    branch.startsWith('feat/') ||
+    branch.startsWith('fix/') ||
+    branch.startsWith('chore/') ||
+    branch.startsWith('refactor/')
+  ) return 'low';
+
+  return 'normal';
 }
 
-// Try language queue first, then fall back to generic
-export async function dequeueBuild(language: WorkerLanguage, timeoutSeconds = 1): Promise<any | null> {
-  const primary = LANGUAGE_QUEUES[language];
+export async function enqueueBuild(
+  buildPayload: any,
+  language: WorkerLanguage = 'generic',
+  priority: BuildPriority = 'normal',
+) {
+  const key = LANGUAGE_QUEUES[language];
+  // Score = priority base + ms timestamp → FIFO within same priority level
+  const score = PRIORITY_SCORE[priority] + Date.now();
+  await redis.zadd(key, score, JSON.stringify(buildPayload));
+  console.log(`Enqueued build ${buildPayload.build_id} → queue:${language} priority:${priority} score:${score}`);
+}
+
+export async function dequeueBuild(language: WorkerLanguage): Promise<any | null> {
+  const primary  = LANGUAGE_QUEUES[language];
   const fallback = LANGUAGE_QUEUES['generic'];
 
-  // Non-blocking check on primary queue first
-  let raw = await redis.rpoplpush(primary, IN_PROGRESS_KEY);
+  // Atomically pop the lowest-score (highest priority) job using a Lua script
+  // to ensure no race condition between check and pop
+  const luaPop = `
+    local result = redis.call('ZPOPMIN', KEYS[1], 1)
+    if #result > 0 then
+      redis.call('LPUSH', KEYS[2], result[1])
+      return result[1]
+    end
+    return nil
+  `;
+
+  let raw = await redis.eval(luaPop, 2, primary, IN_PROGRESS_KEY) as string | null;
+
   if (!raw && language !== 'generic') {
-    // Blocking wait on generic fallback
-    raw = await redis.brpoplpush(fallback, IN_PROGRESS_KEY, timeoutSeconds);
-  } else if (!raw) {
-    raw = await redis.brpoplpush(primary, IN_PROGRESS_KEY, timeoutSeconds);
+    raw = await redis.eval(luaPop, 2, fallback, IN_PROGRESS_KEY) as string | null;
   }
 
   return raw ? JSON.parse(raw) : null;
@@ -50,6 +104,6 @@ export async function acknowledgeBuild(buildPayload: any) {
 
 export async function getQueueDepths(): Promise<Record<string, number>> {
   const entries = Object.entries(LANGUAGE_QUEUES);
-  const lengths = await Promise.all(entries.map(([, key]) => redisReader.llen(key)));
+  const lengths = await Promise.all(entries.map(([, key]) => redisReader.zcard(key)));
   return Object.fromEntries(entries.map(([lang], i) => [lang, lengths[i]]));
 }

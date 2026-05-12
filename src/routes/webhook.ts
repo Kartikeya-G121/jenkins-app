@@ -5,7 +5,7 @@ import axios from 'axios';
 import yaml from 'yaml';
 import { addStages, createArtifact, createBuild, getRepositoryByName, upsertRepository } from '../db';
 import { csrfProtection } from '../middleware/csrf';
-import { enqueueBuild } from '../queue';
+import { enqueueBuild, getBranchPriority } from '../queue';
 
 import { WorkerLanguage } from '../types';
 
@@ -81,6 +81,7 @@ router.post('/', async (req, res) => {
   }
 
   const language = detectLanguage(pipeline);
+  const priority = getBranchPriority(ref || '');
 
   const buildId = uuidv4();
   await createBuild({
@@ -92,6 +93,8 @@ router.post('/', async (req, res) => {
     author: author,
     status: 'queued',
     language,
+    priority,
+    retry_count: 0,
     created_at: now,
     started_at: null,
     finished_at: null,
@@ -149,9 +152,10 @@ router.post('/', async (req, res) => {
     branch: ref,
     pipeline,
     language,
-  }, language);
+    priority,
+  }, language, priority);
 
-  return res.status(201).json({ build_id: buildId, status: 'queued' });
+  return res.status(201).json({ build_id: buildId, status: 'queued', priority });
 });
 
 export default router;

@@ -9,6 +9,8 @@ export interface RepositoryRecord {
   created_at: string;
 }
 
+export type BuildPriority = 'high' | 'normal' | 'low';
+
 export interface BuildRecord {
   id: string;
   repository_id: string;
@@ -18,6 +20,8 @@ export interface BuildRecord {
   author: string;
   status: BuildStatus;
   language: WorkerLanguage;
+  priority: BuildPriority;
+  retry_count: number;
   created_at: string;
   started_at: string | null;
   finished_at: string | null;

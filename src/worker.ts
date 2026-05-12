@@ -1,7 +1,7 @@
 import { spawn } from 'child_process';
-import { getBuild, getStages, updateBuild, updateStage } from './db';
+import { getBuild, getStages, updateBuild, updateStage, incrementRetryCount } from './db';
 import { StageRecord, WorkerInfo, WorkerLanguage } from './types';
-import { dequeueBuild, acknowledgeBuild, getQueueDepths } from './queue';
+import { dequeueBuild, acknowledgeBuild, getQueueDepths, enqueueBuild, getBranchPriority } from './queue';
 
 // 4 workers: one per language + one extra generic
 const WORKER_POOL: WorkerInfo[] = [
@@ -42,16 +42,41 @@ async function runDockerCommand(args: string[], onData: (data: string) => void):
   });
 }
 
-function shouldRunStage(stage: StageRecord, hasFailed: boolean) {
-  switch (stage.when) {
-    case 'always':
-      return true;
-    case 'failed':
-      return hasFailed;
-    case 'success':
-    default:
-      return !hasFailed;
+function shouldRunStage(stage: StageRecord, hasFailed: boolean, branch: string) {
+  const when = stage.when?.trim();
+  
+  if (!when || when === 'success') return !hasFailed;
+  if (when === 'always') return true;
+  if (when === 'failed') return hasFailed;
+
+  // If previous stages failed and it's not a 'failed' or 'always' stage, skip
+  if (hasFailed) return false;
+
+  // Evaluate expressions
+  if (when.startsWith('branch == ')) {
+    const targetBranch = when.replace('branch == ', '').replace(/['"]/g, '').trim();
+    return branch === targetBranch;
   }
+  
+  if (when.startsWith('branch != ')) {
+    const targetBranch = when.replace('branch != ', '').replace(/['"]/g, '').trim();
+    return branch !== targetBranch;
+  }
+
+  if (when.startsWith('tag =~ ')) {
+    // Basic regex support for tags (assuming branch might contain tag if triggered by tag event, or tag is passed)
+    // For MVP, if branch is actually a tag ref, we can check it.
+    const regexStr = when.replace('tag =~ ', '').trim();
+    try {
+      const match = regexStr.match(/^\/(.+)\/([a-z]*)$/);
+      const regex = match ? new RegExp(match[1], match[2]) : new RegExp(regexStr);
+      return regex.test(branch);
+    } catch (e) {
+      return false;
+    }
+  }
+
+  return !hasFailed;
 }
 
 async function isCancelled(buildId: string): Promise<boolean> {
@@ -165,54 +190,47 @@ async function runStage(buildId: string, stage: StageRecord, pipelineImage: stri
   return true;
 }
 
-async function processBuild(payload: any, worker: WorkerInfo) {
+const MAX_RETRIES = 3;
+
+async function processBuild(payload: any, worker: WorkerInfo): Promise<'success' | 'failed' | 'cancelled' | 'retry'> {
   const { build_id, repository, commit_sha, branch, pipeline } = payload;
 
-  if (await isCancelled(build_id)) {
-    return;
-  }
+  if (await isCancelled(build_id)) return 'cancelled';
 
-  console.log(`[${worker.id}] starting build ${build_id.replace(/[\r\n]/g, '')}`);
-  const startedAt = new Date().toISOString();
-  await updateBuild(build_id, { status: 'running', started_at: startedAt });
+  console.log(`[${worker.id}] starting build ${build_id.replace(/[\r\n]/g, '')} (retry: ${payload.retry_count ?? 0})`);
+  await updateBuild(build_id, { status: 'running', started_at: new Date().toISOString() });
 
   const stages = await getStages(build_id);
   let hasFailed = false;
 
-  const pipelineImage = pipeline.image || 'alpine';
-  const pipelineEnv = pipeline.environment || {};
-  const buildEnv = {
-    ...pipelineEnv,
-    COMMIT_SHA: commit_sha,
-    BRANCH_NAME: branch,
-    BUILD_ID: build_id,
-  };
+  const pipelineImage = pipeline?.image || 'alpine';
+  const pipelineEnv = pipeline?.environment || {};
+  const buildEnv = { ...pipelineEnv, COMMIT_SHA: commit_sha, BRANCH_NAME: branch, BUILD_ID: build_id };
 
   const setupSuccess = await setupWorkspace(build_id, repository.url, commit_sha);
-  
   if (!setupSuccess) {
-    await updateBuild(build_id, { status: 'failed', finished_at: new Date().toISOString() });
+    const retryCount = await incrementRetryCount(build_id);
     await cleanupWorkspace(build_id);
-    return;
+    if (retryCount < MAX_RETRIES) {
+      console.log(`[${worker.id}] setup failed, retrying (${retryCount}/${MAX_RETRIES})`);
+      await updateBuild(build_id, { status: 'queued', started_at: null });
+      await enqueueBuild({ ...payload, retry_count: retryCount }, payload.language, payload.priority ?? getBranchPriority(branch));
+      return 'retry';
+    }
+    await updateBuild(build_id, { status: 'failed', finished_at: new Date().toISOString() });
+    return 'failed';
   }
 
   for (const stage of stages) {
-    const run = shouldRunStage(stage, hasFailed);
-
-    if (!run) {
-      await updateStage(stage.id, {
-        status: 'skipped',
-        finished_at: new Date().toISOString(),
-        started_at: new Date().toISOString(),
-        duration_ms: 0,
-      });
+    if (!shouldRunStage(stage, hasFailed, branch)) {
+      await updateStage(stage.id, { status: 'skipped', started_at: new Date().toISOString(), finished_at: new Date().toISOString(), duration_ms: 0 });
       continue;
     }
 
     if (await isCancelled(build_id)) {
       await updateBuild(build_id, { status: 'cancelled', finished_at: new Date().toISOString() });
       await cleanupWorkspace(build_id);
-      return;
+      return 'cancelled';
     }
 
     await updateStage(stage.id, { status: 'running', started_at: new Date().toISOString() });
@@ -223,42 +241,65 @@ async function processBuild(payload: any, worker: WorkerInfo) {
       if (await isCancelled(build_id)) {
         await updateBuild(build_id, { status: 'cancelled', finished_at: new Date().toISOString() });
         await cleanupWorkspace(build_id);
-        return;
+        return 'cancelled';
       }
-      await updateBuild(build_id, { status: 'failed', finished_at: new Date().toISOString() });
-      await cleanupWorkspace(build_id);
-      return;
+
+      // Check remaining stages — if any have when:'always' or when:'failed', keep going
+      const remainingIdx = stages.indexOf(stage) + 1;
+      const hasRemainingHandlers = stages.slice(remainingIdx).some(
+        (s) => s.when === 'always' || s.when === 'failed'
+      );
+
+      if (!hasRemainingHandlers) {
+        const retryCount = await incrementRetryCount(build_id);
+        await cleanupWorkspace(build_id);
+        if (retryCount < MAX_RETRIES) {
+          console.log(`[${worker.id}] stage "${stage.name}" failed, retrying build (${retryCount}/${MAX_RETRIES})`);
+          // Reset all stages back to queued for retry
+          for (const s of stages) {
+            await updateStage(s.id, { status: 'queued', logs: '', exit_code: null, duration_ms: null, started_at: null, finished_at: null });
+          }
+          await updateBuild(build_id, { status: 'queued', started_at: null, finished_at: null });
+          await enqueueBuild({ ...payload, retry_count: retryCount }, payload.language, payload.priority ?? getBranchPriority(branch));
+          return 'retry';
+        }
+        await updateBuild(build_id, { status: 'failed', finished_at: new Date().toISOString() });
+        return 'failed';
+      }
     }
   }
 
-  await updateBuild(build_id, { status: 'success', finished_at: new Date().toISOString() });
+  await updateBuild(build_id, { status: hasFailed ? 'failed' : 'success', finished_at: new Date().toISOString() });
   await cleanupWorkspace(build_id);
+  return hasFailed ? 'failed' : 'success';
 }
 
 async function poll(worker: WorkerInfo) {
   try {
-    // Simulate random arrival jitter before polling (100–800ms)
     await jitter(100, 800);
 
-    const job = await dequeueBuild(worker.language, 5);
+    const job = await dequeueBuild(worker.language);
     if (job) {
       worker.busy = true;
       worker.currentBuildId = job.build_id;
-      console.log(`[${worker.id}] picked up build ${job.build_id} (queue: ${worker.language})`);
+      console.log(`[${worker.id}] picked up build ${job.build_id} priority:${job.priority ?? 'normal'}`);
 
-      // Simulate random pre-execution delay (setup variance)
       await jitter(200, 1200);
+      const result = await processBuild(job, worker);
 
-      await processBuild(job, worker);
-      await acknowledgeBuild(job);
+      if (result !== 'retry') {
+        await acknowledgeBuild(job);
+      } else {
+        // Already re-enqueued — just remove from in-progress
+        await acknowledgeBuild(job);
+      }
 
       worker.jobsProcessed++;
       worker.busy = false;
       worker.currentBuildId = null;
 
-      // Log queue depths after each job for observability
       const depths = await getQueueDepths();
-      console.log(`[${worker.id}] done. Queue depths:`, depths);
+      console.log(`[${worker.id}] done (${result}). Queue depths:`, depths);
     }
   } catch (error) {
     console.error(`[${worker.id}] polling error:`, String(error).replace(/[\r\n]/g, ' '));
@@ -266,8 +307,7 @@ async function poll(worker: WorkerInfo) {
     worker.currentBuildId = null;
   }
 
-  // Each worker schedules its own next poll with individual jitter
-  const nextPoll = Math.floor(Math.random() * 2000) + 1000; // 1–3s
+  const nextPoll = Math.floor(Math.random() * 2000) + 1000;
   setTimeout(() => poll(worker), nextPoll);
 }
 

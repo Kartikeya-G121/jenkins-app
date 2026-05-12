@@ -14,6 +14,8 @@ CREATE TABLE IF NOT EXISTS builds (
   author VARCHAR(255),
   status VARCHAR(32) NOT NULL,
   language VARCHAR(32) NOT NULL DEFAULT 'generic',
+  priority VARCHAR(16) NOT NULL DEFAULT 'normal',
+  retry_count INTEGER NOT NULL DEFAULT 0,
   created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
   started_at TIMESTAMPTZ,
   finished_at TIMESTAMPTZ

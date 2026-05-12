@@ -39,13 +39,22 @@ export async function upsertRepository(repository: RepositoryRecord): Promise<vo
 
 export async function createBuild(build: BuildRecord): Promise<void> {
   await pool.query(
-    `INSERT INTO builds (id, repository_id, ref, commit_id, commit_message, author, status, language, created_at, started_at, finished_at)
-     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)`,
+    `INSERT INTO builds (id, repository_id, ref, commit_id, commit_message, author, status, language, priority, retry_count, created_at, started_at, finished_at)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)`,
     [
       build.id, build.repository_id, build.ref, build.commit_id, build.commit_message, build.author,
-      build.status, build.language ?? 'generic', build.created_at, build.started_at, build.finished_at
+      build.status, build.language ?? 'generic', build.priority ?? 'normal', build.retry_count ?? 0,
+      build.created_at, build.started_at, build.finished_at
     ]
   );
+}
+
+export async function incrementRetryCount(id: string): Promise<number> {
+  const result = await pool.query(
+    `UPDATE builds SET retry_count = retry_count + 1 WHERE id = $1 RETURNING retry_count`,
+    [id]
+  );
+  return result.rows[0]?.retry_count ?? 0;
 }
 
 export async function listBuilds(): Promise<BuildRecord[]> {
