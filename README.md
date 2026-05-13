@@ -223,18 +223,24 @@ npm start
 
 ---
 
-## API reference
+## API Reference
+
+All endpoints return `application/json`. State-changing requests require `X-Requested-With: XMLHttpRequest` (frontend) or `X-Hub-Signature-256` (webhook).
 
 | Method | Path | Description |
 |---|---|---|
-| `POST` | `/webhook` | Receive a push webhook, create and queue a build |
-| `GET` | `/builds` | List all builds (supports `?page=` `?limit=` `?repository_id=`) |
+| `POST` | `/webhook` | Receive a push webhook, verify HMAC, fetch `.cicd.yml`, create and queue a build |
+| `GET` | `/builds` | List all builds. Query params: `?page=` `?limit=` `?repository_id=` |
 | `GET` | `/builds/:id` | Get build detail with stages and artifacts |
-| `GET` | `/builds/:id/logs` | SSE stream of live stage logs |
-| `POST` | `/builds/:id/cancel` | Cancel a queued or running build |
-| `GET` | `/builds/:id/artifacts` | List artifacts declared in the pipeline |
-| `GET` | `/workers` | Current worker pool status |
-| `GET` | `/queue` | Per-language queue depths + active builds |
+| `GET` | `/builds/:id/logs` | SSE stream of live stage logs — emits one event per line, closes with `build.complete` |
+| `POST` | `/builds/:id/cancel` | Cancel a queued or running build — worker stops on next cancellation check |
+| `GET` | `/builds/:id/artifacts` | List artifacts declared in the pipeline for a build |
+| `GET` | `/repositories` | List all registered repositories |
+| `POST` | `/repositories` | Register a new repository (also auto-created on first webhook) |
+| `DELETE` | `/repositories/:id` | Remove a repository record — does not delete associated builds |
+| `GET` | `/workers` | Current worker pool status — id, language, busy, jobsProcessed, currentBuildId |
+| `GET` | `/queue` | Per-language Redis queue depths + all active (queued/running) builds from DB |
+| `GET` | `/` | Health check |
 
 ---
 
